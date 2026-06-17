@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Sea-Cast: 작살 낚시 액션 모드</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #2CA5E0; font-family: 'Pretendard', sans-serif; touch-action: none; }
+        #canvas-container { width: 100vw; height: 100vh; display: block; }
+        #ui-layer { position: absolute; top: 20px; left: 20px; color: white; z-index: 10; pointer-events: none; text-shadow: 0 2px 4px rgba(0,0,0,0.6); }
+        h1 { margin: 0 0 10px 0; font-size: 24px; font-weight: 800; }
+        p { margin: 0 0 5px 0; font-size: 14px; opacity: 0.9; font-weight: bold; }
+        
+        .view-btn { position: absolute; top: 20px; right: 20px; z-index: 20; background: rgba(0, 0, 0, 0.3); border: 2px solid white; color: white; padding: 10px 20px; border-radius: 20px; cursor: pointer; backdrop-filter: blur(5px); font-weight: bold; pointer-events: auto; }
+        .view-btn:hover { background: white; color: #2CA5E0; }
+        
+        #joystick-zone { position: absolute; bottom: 30px; left: 30px; width: 120px; height: 120px; z-index: 20; opacity: 0.8; }
+        
+        /* 조준점 및 파워 게이지 UI */
+        #crosshair-container { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 15; pointer-events: none; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        #crosshair { width: 12px; height: 12px; border: 2px solid rgba(255,255,255,0.8); border-radius: 50%; box-shadow: 0 0 5px rgba(0,0,0,0.5); }
+        #charge-bar-bg { width: 60px; height: 8px; background: rgba(0,0,0,0.5); border-radius: 4px; margin-top: 10px; overflow: hidden; display: none; border: 1px solid rgba(255,255,255,0.3); }
+        #charge-bar-fill { width: 0%; height: 100%; background: linear-gradient(90deg, #00f2fe 0%, #4facfe 100%); transition: width 0.1s linear; }
+
+        /* 조과 팝업 */
+        #fish-info { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(10px); border-radius: 20px; padding: 25px 40px; color: #333; text-align: center; display: none; z-index: 30; box-shadow: 0 15px 35px rgba(0,0,0,0.4); }
+        #fish-info h2 { margin: 0 0 10px 0; color: #0088ff; font-weight: 900; }
+        #fish-info .date { font-size: 15px; color: #666; margin-bottom: 20px; font-weight: bold; }
+        .close-btn { background: #0088ff; color: white; border: none; padding: 10px 25px; border-radius: 12px; cursor: pointer; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div id="ui-layer">
+        <h1>🏝️ Sea-Cast 해저 사냥</h1>
+        <p>PC: 좌클릭 꾹 누르기(차지/발사) / WASD(이동)</p>
+        <p>모바일: 화면 터치 꾹 누르기(발사) / 조이스틱(이동)</p>
+    </div>
+    <button class="view-btn" onclick="toggleView()">시점 전환 (1/3인칭)</button>
+    
+    <div id="crosshair-container">
+        <div id="crosshair"></div>
+        <div id="charge-bar-bg"><div id="charge-bar-fill"></div></div>
+    </div>
+
+    <div id="fish-info">
+        <h2 id="modal-title">어종 이름</h2>
+        <div class="date" id="modal-date">잡은 날짜: 2026. 04. 13</div>
+        <button class="close-btn" onclick="closeModal()">가방에 넣기</button>
+    </div>
+    
+    <div id="joystick-zone"></div>
+    <div id="canvas-container"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/nipplejs/0.10.1/nipplejs.min.js"></script>
+
+    <script>
+        // 1. 기본 환경 세팅
+        const scene = new THREE.Scene();
+        const waterColor = new THREE.Color(0x2CA5E0);
+        scene.background = waterColor;
+        scene.fog = new THREE.FogExp2(waterColor, 0.015);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6); scene.add(ambientLight);
+        const sunLight = new THREE.DirectionalLight(0xfffaee, 1.0); sunLight.position.set(20, 50, 20); sunLight.castShadow = true; scene.add(sunLight);
+
+        // 바닥 및 장식 생성
+        const boundSize = 150;
+        const groundGeo = new THREE.PlaneGeometry(boundSize, boundSize, 64, 64);
+        const pos = groundGeo.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+            const x = pos.getX(i), y = pos.getY(i);
+            pos.setZ(i, Math.sin(x*0.05)*3 + Math.cos(y*0.05)*3 + Math.sin((x+y)*0.1)*1.5);
+        }
+        groundGeo.computeVertexNormals();
+        const ground = new THREE.Mesh(groundGeo, new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.9, metalness: 0.1 }));
+        ground.rotation.x = -Math.PI / 2; ground.position.y = -25; ground.receiveShadow = true; scene.add(ground);
+
+        const seaweeds = [];
+        for(let i=0; i<60; i++) {
+            const px = (Math.random()-0.5)*120, pz = (Math.random()-0.5)*120;
+            const py = -25 + (Math.sin(px*0.05)*3 + Math.cos(pz*0.05)*3 + Math.sin((px+pz)*0.1)*1.5);
+            const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(Math.random()*3+0.5), new THREE.MeshStandardMaterial({color:0x7f8c8d}));
+            rock.position.set(px, py, pz); rock.scale.set(1, Math.random()*0.5+0.5, 1); scene.add(rock);
+            if(Math.random() > 0.4) {
+                const height = Math.random()*5+3;
+                const weed = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.2, height, 5), new THREE.MeshStandardMaterial({color:0x27ae60}));
+                weed.position.set(px+2, py+height/2, pz+2); scene.add(weed); seaweeds.push({ mesh: weed, offset: Math.random()*10 });
+            }
+        }
+
+        // 다이버 세팅
+        const diverGroup = new THREE.Group(), diverBody = new THREE.Group();
+        const matSuit = new THREE.MeshStandardMaterial({ color: 0x111111 }), matTank = new THREE.MeshStandardMaterial({ color: 0xffcc00 }); 
+        const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 2, 8), matSuit); torso.rotation.x = Math.PI/2;
+        const tank = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 1.8, 8), matTank); tank.position.set(0, 0.4, 0); tank.rotation.x = Math.PI/2;
+        diverBody.add(torso, tank);
+        const head = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.7, 0.7), matSuit); head.position.set(0, 0, 1.2); diverBody.add(head);
+        function createLeg(isRight) {
+            const legRoot = new THREE.Group();
+            const thigh = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.15, 1, 6), matSuit); thigh.position.y = -0.5; thigh.rotation.x = Math.PI/2; legRoot.add(thigh);
+            const shinRoot = new THREE.Group(); shinRoot.position.set(0, 0, -1);
+            const shin = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.1, 1, 6), matSuit); shin.rotation.x = Math.PI/2; shin.position.y = -0.5; shinRoot.add(shin);
+            const fin = new THREE.Mesh(new THREE.PlaneGeometry(0.6, 1.2), new THREE.MeshStandardMaterial({ color: 0x00a8ff, side: THREE.DoubleSide })); fin.position.set(0, -0.6, 0.2); fin.rotation.x = Math.PI/2; shinRoot.add(fin);
+            legRoot.add(shinRoot); legRoot.userData = { shinRoot }; legRoot.position.set(isRight ? 0.25 : -0.25, 0, -1); return legRoot;
+        }
+        const legL = createLeg(false), legR = createLeg(true); diverBody.add(legL, legR);
+        diverGroup.add(diverBody); diverGroup.position.set(0, 5, 0); scene.add(diverGroup);
+
+        const fpvOffset = new THREE.Vector3(0, 0.3, 1.3), tpvOffset = new THREE.Vector3(0, 2, -7);
+        let isFirstPerson = false;
+        function updateCameraPerspective() { diverGroup.visible = !isFirstPerson; }
+        window.toggleView = function() { isFirstPerson = !isFirstPerson; updateCameraPerspective(); }
+
+        // 물고기 생성 로직
+        const fishes = [];
+        function createEye(x, y, z) {
+            const eyeGroup = new THREE.Group();
+            const white = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 8), new THREE.MeshStandardMaterial({color: 0xffffff}));
+            const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.06, 8, 8), new THREE.MeshStandardMaterial({color: 0x000000})); pupil.position.set(0.08, 0, 0);
+            eyeGroup.add(white, pupil); eyeGroup.position.set(x, y, z); return eyeGroup;
+        }
+
+        function createFish(type, count) {
+            for(let i=0; i<count; i++) {
+                const fishGroup = new THREE.Group(); let bodyMat, tailRoot = new THREE.Group();
+                if(type === '상어') {
+                    bodyMat = new THREE.MeshStandardMaterial({ color: 0x7f8c8d });
+                    const body = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 16), bodyMat); body.scale.set(3.5, 0.9, 0.7);
+                    const dorsal = new THREE.Mesh(new THREE.ConeGeometry(0.5, 1.5, 4), bodyMat); dorsal.position.set(0.5, 0.8, 0); dorsal.rotation.z = -0.3;
+                    const tail = new THREE.Mesh(new THREE.ConeGeometry(1, 2.5, 4), bodyMat); tail.position.set(-1.2, 0, 0); tail.rotation.z = -Math.PI/2; tailRoot.position.set(-3, 0, 0); tailRoot.add(tail);
+                    const eyeL = createEye(2.5, 0.2, 0.5); eyeL.rotation.y = Math.PI/4; const eyeR = createEye(2.5, 0.2, -0.5); eyeR.rotation.y = -Math.PI/4;
+                    fishGroup.add(body, dorsal, eyeL, eyeR, tailRoot);
+                    fishGroup.userData = { tailObj: tailRoot, type: '백상아리', date: '2026-04-12', speed: 0.12, wobble: 0.1, hitRadius: 3.5 };
+                } else if(type === '참치') {
+                    bodyMat = new THREE.MeshStandardMaterial({ color: 0x3498db, metalness: 0.6 });
+                    const body = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 16), bodyMat); body.scale.set(2.5, 1, 0.6);
+                    const tailTop = new THREE.Mesh(new THREE.ConeGeometry(0.3, 1.5, 4), bodyMat); tailTop.position.set(-0.5, 0.5, 0); tailTop.rotation.z = -2;
+                    const tailBot = new THREE.Mesh(new THREE.ConeGeometry(0.3, 1.5, 4), bodyMat); tailBot.position.set(-0.5, -0.5, 0); tailBot.rotation.z = -1.1; tailRoot.position.set(-2, 0, 0); tailRoot.add(tailTop, tailBot);
+                    fishGroup.add(body, tailRoot);
+                    fishGroup.userData = { tailObj: tailRoot, type: '참다랑어', date: '2026-04-10', speed: 0.18, wobble: 0.2, hitRadius: 2.5 };
+                } else {
+                    bodyMat = new THREE.MeshStandardMaterial({ color: 0xe67e22 });
+                    const body = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 16), bodyMat); body.scale.set(1.5, 1.2, 0.6);
+                    const tail = new THREE.Mesh(new THREE.ConeGeometry(0.6, 1.2, 4), bodyMat); tail.position.set(-0.5, 0, 0); tail.rotation.z = -Math.PI/2; tailRoot.position.set(-1.2, 0, 0); tailRoot.add(tail);
+                    fishGroup.add(body, tailRoot);
+                    fishGroup.userData = { tailObj: tailRoot, type: '조피볼락(우럭)', date: '2026-04-05', speed: 0.06, wobble: 0.15, hitRadius: 1.5 };
+                }
+                
+                // 물고기 초기화 로직 (사냥 후 리스폰용)
+                fishGroup.userData.reset = function() {
+                    this.isCaught = false;
+                    fishGroup.position.set((Math.random()-0.5)*100, (Math.random()-0.5)*30 - 5, (Math.random()-0.5)*100);
+                    fishGroup.userData.target = new THREE.Vector3((Math.random()-0.5)*100, (Math.random()-0.5)*30 - 5, (Math.random()-0.5)*100);
+                }
+                fishGroup.userData.reset.call(fishGroup.userData); // 초기 위치 설정
+                fishGroup.userData.offset = Math.random() * 100;
+                scene.add(fishGroup); fishes.push(fishGroup);
+            }
+        }
+        createFish('상어', 3); createFish('참치', 8); createFish('우럭', 15);
+
+        // ==========================================
+        // 🐟 [NEW] 작살(Harpoon) 시스템 구현
+        // ==========================================
+        
+        // 작살 오브젝트
+        const harpoonGroup = new THREE.Group();
+        const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 4, 8), new THREE.MeshStandardMaterial({ color: 0x95a5a6, metalness: 0.8 }));
+        shaft.rotation.x = Math.PI / 2; // 앞으로 향하게
+        const tip = new THREE.Mesh(new THREE.ConeGeometry(0.15, 0.5, 8), new THREE.MeshStandardMaterial({ color: 0xbdc3c7, metalness: 1.0 }));
+        tip.position.set(0, 0, 2); tip.rotation.x = Math.PI / 2;
+        harpoonGroup.add(shaft, tip);
+        harpoonGroup.visible = false;
+        scene.add(harpoonGroup);
+
+        // 밧줄 오브젝트
+        const ropeMaterial = new THREE.LineBasicMaterial({ color: 0xecf0f1, linewidth: 2 });
+        const ropeGeometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0), new THREE.Vector3(0,0,0)]);
+        const rope = new THREE.Line(ropeGeometry, ropeMaterial);
+        rope.visible = false;
+        scene.add(rope);
+
+        // 작살 상태 머신
+        const HARPOON_STATE = { IDLE: 0, CHARGING: 1, FIRED: 2, RETRACTING: 3 };
+        let currentHarpoonState = HARPOON_STATE.IDLE;
+        let chargeStartTime = 0;
+        let harpoonVelocity = new THREE.Vector3();
+        let caughtFish = null;
+        const MAX_CHARGE_TIME = 5000; // 5초
+        const HARPOON_SPEED = 60; // 작살 발사 속도
+
+        const chargeBg = document.getElementById('charge-bar-bg');
+        const chargeFill = document.getElementById('charge-bar-fill');
+
+        function startCharge(e) {
+            // 조이스틱 터치나 모달창 클릭이면 무시
+            if(e.touches && e.touches[0].clientX < window.innerWidth/2) return; 
+            if(document.getElementById('fish-info').style.display === 'block') return;
+
+            if(currentHarpoonState === HARPOON_STATE.IDLE) {
+                currentHarpoonState = HARPOON_STATE.CHARGING;
+                chargeStartTime = Date.now();
+                chargeBg.style.display = 'block';
+                chargeFill.style.width = '0%';
+            }
+        }
+
+        function fireHarpoon() {
+            if(currentHarpoonState === HARPOON_STATE.CHARGING) {
+                const chargeDuration = Math.min(Date.now() - chargeStartTime, MAX_CHARGE_TIME);
+                const power = Math.max(chargeDuration / MAX_CHARGE_TIME, 0.2); // 최소 파워 20% 보장
+                
+                currentHarpoonState = HARPOON_STATE.FIRED;
+                chargeBg.style.display = 'none';
+                
+                // 다이버 위치에서 작살 발사
+                harpoonGroup.position.copy(diverGroup.position);
+                harpoonGroup.position.y += 0.5; // 가슴 높이에서 발사
+                harpoonGroup.visible = true;
+                rope.visible = true;
+
+                // 카메라가 바라보는 방향으로 속도 벡터 설정
+                camera.getWorldDirection(harpoonVelocity);
+                
+                // 작살이 날아가는 방향 바라보기
+                harpoonGroup.lookAt(harpoonGroup.position.clone().add(harpoonVelocity));
+                
+                harpoonVelocity.multiplyScalar(HARPOON_SPEED * power); // 파워에 비례한 사거리/속도
+            }
+        }
+
+        window.addEventListener('mousedown', startCharge);
+        window.addEventListener('mouseup', fireHarpoon);
+        window.addEventListener('touchstart', startCharge, {passive: false});
+        window.addEventListener('touchend', fireHarpoon);
+
+        window.closeModal = function() { 
+            document.getElementById('fish-info').style.display = 'none'; 
+            if(caughtFish) {
+                caughtFish.userData.reset.call(caughtFish.userData); // 물고기 방생(초기화)
+                caughtFish = null;
+            }
+        }
+
+        // ==========================================
+        // 이동 및 시점 조작 (이전과 동일)
+        // ==========================================
+        const moveState = { forward: 0, right: 0, up: 0 }; const rotationState = { yaw: 0, pitch: 0 };
+        window.addEventListener('keydown', (e) => { const k=e.key.toLowerCase(); if(k==='w') moveState.forward=1; if(k==='s') moveState.forward=-1; if(k==='a') moveState.right=-1; if(k==='d') moveState.right=1; if(k==='r') moveState.up=1; if(k==='f') moveState.up=-1; });
+        window.addEventListener('keyup', (e) => { const k=e.key.toLowerCase(); if(k==='w'||k==='s') moveState.forward=0; if(k==='a'||k==='d') moveState.right=0; if(k==='r'||k==='f') moveState.up=0; });
+
+        let isDragging = false, prevMouse = {x:0, y:0};
+        function startDrag(e) { if(e.touches && e.touches[0].clientX < window.innerWidth/2) return; isDragging = true; prevMouse = { x: e.clientX||e.touches[0].clientX, y: e.clientY||e.touches[0].clientY }; }
+        function doDrag(e) { if(!isDragging) return; const x = e.clientX||e.touches[0].clientX, y = e.clientY||e.touches[0].clientY; rotationState.yaw -= (x-prevMouse.x)*0.003; rotationState.pitch -= (y-prevMouse.y)*0.003; rotationState.pitch = Math.max(-Math.PI/2.1, Math.min(Math.PI/2.1, rotationState.pitch)); prevMouse = {x, y}; }
+        window.addEventListener('mousemove', doDrag); window.addEventListener('touchmove', doDrag);
+
+        const joystick = nipplejs.create({ zone: document.getElementById('joystick-zone'), mode: 'static', position: { left: '60px', bottom: '60px' }, color: 'white', size: 100 });
+        joystick.on('move', (evt, data) => { moveState.forward = Math.sin(data.angle.radian) * (data.distance/50); moveState.right = Math.cos(data.angle.radian) * (data.distance/50); });
+        joystick.on('end', () => { moveState.forward = 0; moveState.right = 0; });
+
+        // 애니메이션 루프
+        const clock = new THREE.Clock();
+        function animate() {
+            requestAnimationFrame(animate);
+            const delta = clock.getDelta(); const time = clock.getElapsedTime();
+
+            // 다이버 이동
+            diverGroup.rotation.y = rotationState.yaw;
+            const camDir = new THREE.Vector3(); camera.getWorldDirection(camDir);
+            const camRight = new THREE.Vector3().crossVectors(camera.up, camDir).normalize();
+            const moveVec = new THREE.Vector3(); moveVec.addScaledVector(camDir, moveState.forward); moveVec.addScaledVector(camRight, -moveState.right); moveVec.y += moveState.up;
+
+            if(moveVec.length() > 0.1) {
+                moveVec.normalize(); diverGroup.position.addScaledVector(moveVec, 8 * delta);
+                diverBody.rotation.x = THREE.MathUtils.lerp(diverBody.rotation.x, moveState.forward * (Math.PI/6) + moveState.up * (Math.PI/10), 0.1);
+            } else { diverBody.rotation.x = THREE.MathUtils.lerp(diverBody.rotation.x, 0, 0.05); }
+
+            const swim = Math.sin(time * 4) * 0.4; legL.rotation.x = swim; legR.rotation.x = -swim;
+            legL.userData.shinRoot.rotation.x = -Math.sin(time*4 + Math.PI/2) * 0.3; legR.userData.shinRoot.rotation.x = -Math.sin(time*4 - Math.PI/2) * 0.3;
+
+            const targetPos = (isFirstPerson ? fpvOffset : tpvOffset).clone().applyMatrix4(diverGroup.matrixWorld);
+            camera.position.copy(targetPos);
+            if(isFirstPerson) { camera.rotation.set(rotationState.pitch, rotationState.yaw, 0, 'YXZ'); } 
+            else { camera.lookAt(fpvOffset.clone().applyMatrix4(diverGroup.matrixWorld)); }
+            diverGroup.position.y = Math.max(-20, Math.min(10, diverGroup.position.y));
+
+            // [NEW] 작살 시스템 로직
+            if(currentHarpoonState === HARPOON_STATE.CHARGING) {
+                const chargeRatio = Math.min((Date.now() - chargeStartTime) / MAX_CHARGE_TIME, 1);
+                chargeFill.style.width = (chargeRatio * 100) + '%';
+                // 풀차지 시 게이지 색상 붉은색으로 변경
+                chargeFill.style.background = chargeRatio >= 1 ? 'linear-gradient(90deg, #ff0844 0%, #ffb199 100%)' : 'linear-gradient(90deg, #00f2fe 0%, #4facfe 100%)';
+            }
+            else if(currentHarpoonState === HARPOON_STATE.FIRED) {
+                // 작살 이동
+                harpoonGroup.position.addScaledVector(harpoonVelocity, delta);
+                
+                // 밧줄 연결
+                const positions = rope.geometry.attributes.position.array;
+                positions[0] = diverGroup.position.x; positions[1] = diverGroup.position.y + 0.5; positions[2] = diverGroup.position.z;
+                positions[3] = harpoonGroup.position.x; positions[4] = harpoonGroup.position.y; positions[5] = harpoonGroup.position.z;
+                rope.geometry.attributes.position.needsUpdate = true;
+
+                // 충돌 검사 (모든 물고기와 거리 계산)
+                for(let fish of fishes) {
+                    if(!fish.userData.isCaught && harpoonGroup.position.distanceTo(fish.position) < fish.userData.hitRadius) {
+                        // 명중!
+                        caughtFish = fish;
+                        caughtFish.userData.isCaught = true;
+                        currentHarpoonState = HARPOON_STATE.RETRACTING;
+                        break;
+                    }
+                }
+
+                // 사거리 끝에 도달하면 회수 (다이버와의 거리 계산)
+                if(harpoonGroup.position.distanceTo(diverGroup.position) > 60) {
+                    currentHarpoonState = HARPOON_STATE.RETRACTING;
+                }
+            }
+            else if(currentHarpoonState === HARPOON_STATE.RETRACTING) {
+                // 작살이 다이버를 향해 돌아옴
+                const returnDir = new THREE.Vector3().subVectors(diverGroup.position, harpoonGroup.position).normalize();
+                harpoonGroup.position.addScaledVector(returnDir, 40 * delta); // 회수 속도
+                
+                // 잡힌 물고기도 작살에 꽂혀서 끌려옴
+                if(caughtFish) {
+                    caughtFish.position.copy(harpoonGroup.position);
+                    caughtFish.rotation.y += 0.2; // 끌려오면서 파닥거리는 효과
+                }
+
+                // 밧줄 연결 업데이트
+                const positions = rope.geometry.attributes.position.array;
+                positions[0] = diverGroup.position.x; positions[1] = diverGroup.position.y + 0.5; positions[2] = diverGroup.position.z;
+                positions[3] = harpoonGroup.position.x; positions[4] = harpoonGroup.position.y; positions[5] = harpoonGroup.position.z;
+                rope.geometry.attributes.position.needsUpdate = true;
+
+                // 다이버에게 도착하면 종료
+                if(harpoonGroup.position.distanceTo(diverGroup.position) < 2) {
+                    currentHarpoonState = HARPOON_STATE.IDLE;
+                    harpoonGroup.visible = false;
+                    rope.visible = false;
+                    
+                    if(caughtFish) {
+                        // 정보창 띄우기
+                        document.getElementById('modal-title').innerText = caughtFish.userData.type;
+                        document.getElementById('modal-date').innerText = `사냥 날짜: ${caughtFish.userData.date}`;
+                        document.getElementById('fish-info').style.display = 'block';
+                    }
+                }
+            }
+
+            // 물고기 유영 AI (안 잡힌 애들만 움직임)
+            fishes.forEach(fish => {
+                const data = fish.userData; const target = data.target;
+                if(!data.isCaught) {
+                    const dir = new THREE.Vector3().subVectors(target, fish.position).normalize();
+                    const rot = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(1, 0, 0), dir);
+                    fish.quaternion.slerp(rot, 0.03); fish.translateOnAxis(new THREE.Vector3(1, 0, 0), data.speed);
+                    if(data.tailObj) data.tailObj.rotation.y = Math.sin(time * 15 + data.offset) * data.wobble;
+                    if(fish.position.distanceTo(target) < 5) target.set((Math.random()-0.5)*120, (Math.random()-0.5)*25 - 5, (Math.random()-0.5)*120);
+                }
+            });
+
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => { camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); });
+    </script>
+</body>
+</html>
